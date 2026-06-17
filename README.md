@@ -19,7 +19,7 @@
 
 ```bash
 # Clone into Claude Code skills directory
-git clone https://github.com/YOUR_USERNAME/site-clone.git ~/.claude/skills/site-clone
+git clone https://github.com/fanke009527-debug/site-clone.git ~/.claude/skills/site-clone
 ```
 
 Requires:
