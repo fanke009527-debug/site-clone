@@ -26,6 +26,8 @@ allowed-tools:
   - mcp__playwright__browser_snapshot
   - mcp__playwright__browser_take_screenshot
   - mcp__playwright__browser_console_messages
+  - mcp__playwright__browser_click
+  - mcp__playwright__browser_hover
   - mcp__bouncy__fetch
   - mcp__bouncy__scrape
   - mcp__bouncy__extract_text
@@ -34,11 +36,57 @@ allowed-tools:
 
 # Site Clone — Production-Grade Website Mirroring Skill
 
-One-shot website cloning workflow: Setup → Capture → Download → Rewrite → Validate → Fix → Done.
+One-shot website cloning workflow: Pre-flight → Capture (interaction sweep) → Download → Rewrite (dynamic) → Validate → Sitemap → Done.
 
 ---
 
 ## Workflow
+
+### Step 0: Pre-Flight Checklist
+
+Before starting the clone, run these checks to fail fast on unsupported targets:
+
+```powershell
+$url = "https://$domain/"
+Write-Host "=== Pre-flight: $domain ==="
+
+# 1. Accessibility check
+try {
+    $resp = Invoke-WebRequest -Uri $url -TimeoutSec 10 -UseBasicParsing -Method Head
+    Write-Host "  HTTP: $($resp.StatusCode)"
+} catch {
+    Write-Host "  BLOCKED: Site unreachable — $($_.Exception.Message)"
+    # STOP here — site is down or behind a wall
+}
+
+# 2. Framework fingerprint (informs asset path patterns)
+$html = curl.exe -s -L --max-time 15 "$url"
+switch -Regex ($html) {
+    '__NEXT_DATA__|_next/'  { Write-Host "  FRAMEWORK: Next.js" }
+    '__NUXT__|_nuxt/'       { Write-Host "  FRAMEWORK: Nuxt" }
+    'wp-content|wp-includes' { Write-Host "  FRAMEWORK: WordPress" }
+    'shopify'               { Write-Host "  FRAMEWORK: Shopify" }
+    'data-reactroot'        { Write-Host "  FRAMEWORK: React (CRA)" }
+    '<astro-'               { Write-Host "  FRAMEWORK: Astro" }
+}
+
+# 3. Bot detection check
+if ($html -match 'cf-turnstile|_cf_chl_opt|recaptcha|hcaptcha|challenge-platform') {
+    Write-Host "  WARNING: CAPTCHA/bot detection found — Full mode may be blocked"
+}
+
+# 4. Auth gate check
+if ($html -match 'login|signin|password' -and $html -match '<form') {
+    Write-Host "  WARNING: Login form detected — may be auth-gated"
+}
+```
+
+**Stop conditions at Step 0:**
+- Site returns 403/503 → **BLOCKED** (try again later)
+- CAPTCHA wall → **BLOCKED** (document in output)
+- Auth redirect → **BLOCKED** (needs credentials)
+
+---
 
 ### Step 1: Setup Clone Directory
 
@@ -58,15 +106,54 @@ Two capture modes are available:
 
 #### Mode A: Full (Playwright — Claude Code recommended)
 
-**Step 2a — Navigate and wait:**
+**Step 2a — Navigate, then interaction sweep (scroll → hover → click):**
+
+Navigate to the target URL:
 ```
 mcp__playwright__browser_navigate → url
 ```
-Wait 3-5 seconds for JS execution. For infinite-scroll pages, also scroll to bottom:
+Wait 3 seconds for initial JS execution.
+
+**Interaction sweep — capture all dynamic states before saving HTML:**
+
 ```
-mcp__playwright__browser_evaluate → () => { window.scrollTo(0, document.body.scrollHeight); return 'scrolled'; }
+1. SCROLL to trigger lazy-loaded content and scroll-based animations:
+   mcp__playwright__browser_evaluate → 
+   () => {
+     const height = document.body.scrollHeight;
+     const steps = 10;
+     for (let i = 1; i <= steps; i++) {
+       window.scrollTo(0, (height / steps) * i);
+     }
+     window.scrollTo(0, 0);  // back to top
+     return `scrolled ${height}px in ${steps} steps`;
+   }
+   Wait 2 seconds after scroll.
+
+2. HOVER over navigation items to reveal dropdowns:
+   mcp__playwright__browser_hover → selector: "nav a, .nav-item, [class*=menu]"
+   (Hover each match; wait 300ms between)
+   mcp__playwright__browser_snapshot → capture revealed content
+
+3. CLICK through carousels/tabs to capture all slides/panels:
+   mcp__playwright__browser_evaluate →
+   () => {
+     // Detect carousel/tab controls
+     const controls = [
+       ...document.querySelectorAll('[class*=carousel] button, [class*=slider] button, [class*=tab], .swiper-button, [role=tab]')
+     ];
+     return JSON.stringify(controls.map(c => ({ text: c.textContent?.trim().slice(0,40), tag: c.tagName, className: c.className?.slice(0,60) })));
+   }
+   
+   Then click each control and capture state:
+   mcp__playwright__browser_click → index of each control
+   mcp__playwright__browser_evaluate → () => document.documentElement.outerHTML
+   (Save each state's HTML as a variant for reference)
+
+4. RETURN to default state:
+   mcp__playwright__browser_navigate → url (reload)
+   Wait 2 seconds.
 ```
-Then wait 2 more seconds.
 
 **Step 2b — Capture rendered HTML including Shadow DOM:**
 ```javascript
@@ -228,26 +315,81 @@ if ($failed.Count -gt 0) { Write-Host "Failed: $($failed.Count) — will retry i
 
 ---
 
-### Step 6: Rewrite Paths
+### Step 6: Rewrite Paths — Dynamic Prefix Discovery
 
-Only rewrite the target domain's absolute paths to relative. Never touch external CDN URLs.
+**Do NOT hardcode directory names.** Instead, auto-discover all unique path prefixes from the actual downloaded asset list, then generate rewrite rules dynamically.
 
 ```powershell
 $html = Get-Content "$cloneDir\index.html" -Raw -Encoding UTF8
-
-# Replace absolute domain paths with relative (systematic — not per-directory)
 $escapedDomain = [regex]::Escape($domain)
-$html = $html -replace "https?://${escapedDomain}/(images/|videos/|fonts/|js/|css/|assets/|_nuxt/|static/)", './$1'
-$html = $html -replace 'src="/_nuxt/', 'src="./_nuxt/'
-$html = $html -replace 'href="/_nuxt/', 'href="./_nuxt/'
 
-# Save with correct encoding
+# 6a — Discover all unique directory prefixes from downloaded assets
+$prefixes = $assets | ForEach-Object {
+    if ($_ -match '^([a-zA-Z0-9_-]+)/') { $matches[1] }
+    elseif ($_ -match '^([a-zA-Z0-9_-]+)$') { $null }  # root-level file, skip
+} | Where-Object { $_ } | Sort-Object -Unique
+
+Write-Host "Discovered path prefixes: $($prefixes -join ', ')"
+
+# 6b — Generate and apply rewrite rules for each discovered prefix
+foreach ($prefix in $prefixes) {
+    $escapedPrefix = [regex]::Escape($prefix)
+    
+    # Absolute URLs → relative
+    $html = $html -replace "https?://${escapedDomain}/${escapedPrefix}/", "./${prefix}/"
+    $html = $html -replace "https?://${escapedDomain}/${escapedPrefix}`"", "./${prefix}`""
+    
+    # Root-relative paths → relative  
+    $html = $html -replace "src=`"/${escapedPrefix}/", "src=`"./${prefix}/"
+    $html = $html -replace "href=`"/${escapedPrefix}/", "href=`"./${prefix}/"
+    $html = $html -replace "url\(`"/${escapedPrefix}/", "url(`"./${prefix}/"
+    $html = $html -replace "url\(/${escapedPrefix}/", "url(./${prefix}/"
+    
+    # Single-quoted variants
+    $html = $html -replace "src='/${escapedPrefix}/", "src='./${prefix}/"
+    $html = $html -replace "href='/${escapedPrefix}/", "href='./${prefix}/"
+}
+
+# 6c — Also rewrite root-level asset files (e.g. /transitions.js, /noise.js)
+$rootAssets = $assets | Where-Object { $_ -notmatch '/' } | ForEach-Object { $_ -replace '\?.*$', '' } | Sort-Object -Unique
+foreach ($asset in $rootAssets) {
+    $escapedAsset = [regex]::Escape($asset)
+    $html = $html -replace "https?://${escapedDomain}/${escapedAsset}", "./${asset}"
+    $html = $html -replace "src=`"/${escapedAsset}`"", "src=`"./${asset}`""
+    $html = $html -replace "href=`"/${escapedAsset}`"", "href=`"./${asset}`""
+    $html = $html -replace "src='/${escapedAsset}'", "src='./${asset}'"
+    $html = $html -replace "href='/${escapedAsset}'", "href='./${asset}'"
+}
+
+# 6d — Insert <base href="./"> as a safety net for any missed paths
+if ($html -notmatch '<base\s+[^>]*href') {
+    $html = $html -replace '(<head[^>]*>)', "`$1`n  <base href=`"./`">"
+    Write-Host "  Inserted <base href=`"./`">"
+} else {
+    Write-Host "  Existing <base> tag preserved"
+}
+
+# 6e — Save with correct encoding
 [System.IO.File]::WriteAllText("$cloneDir\index.html", $html, [System.Text.UTF8Encoding]::new($false))
 
-Write-Host "Paths rewritten"
+Write-Host "Paths rewritten: $($prefixes.Count) prefixes + $($rootAssets.Count) root assets"
 ```
 
-**Rule:** If the original HTML uses relative paths (like `images/x.webp` without leading `/`), no rewriting is needed.
+**Cleanup — remove known CDN artifacts that produce spurious 404s:**
+
+```powershell
+# Cloudflare-specific artifacts that need removal (not download):
+$html = $html -replace '<script[^>]*cdn-cgi/scripts/[^<]*email-decode[^<]*</script>', ''
+$html = $html -replace '<script[^>]*cloudflare[^<]*(rocket-loader|email-protection|cf-beacon)[^<]*</script>', ''
+$html = $html -replace '<span[^>]*__cf_email__[^>]*>.*?</span>', '<!-- cf email removed -->'
+
+# Replace Cloudflare email obfuscation with direct mailto:
+$html = $html -replace '\[email&#160;protected\]', 'contact@' + $domain
+
+[System.IO.File]::WriteAllText("$cloneDir\index.html", $html, [System.Text.UTF8Encoding]::new($false))
+```
+
+**Rule:** Only rewrite paths belonging to the target domain. Never touch external CDN URLs (cdn.jsdelivr.net, unpkg.com, fonts.googleapis.com, etc.).
 
 ---
 
@@ -259,18 +401,38 @@ Compare the local (rewritten) HTML against the live HTML to catch encoding corru
 $live = Get-Content "$env:TEMP\live_compare.html" -Raw -Encoding UTF8
 $local = Get-Content "$cloneDir\index.html" -Raw -Encoding UTF8
 
-# Normalize the live HTML with the same rewrites applied to local
+# Apply the SAME dynamic rewrites to the live HTML for fair comparison
 $liveNormalized = $live
 $escapedDomain = [regex]::Escape($domain)
-$liveNormalized = $liveNormalized -replace "https?://${escapedDomain}/(images/|videos/|fonts/|js/|css/|assets/|_nuxt/|static/)", './$1'
-$liveNormalized = $liveNormalized -replace 'src="/_nuxt/', 'src="./_nuxt/'
-$liveNormalized = $liveNormalized -replace 'href="/_nuxt/', 'href="./_nuxt/'
+
+foreach ($prefix in $prefixes) {
+    $escapedPrefix = [regex]::Escape($prefix)
+    $liveNormalized = $liveNormalized -replace "https?://${escapedDomain}/${escapedPrefix}/", "./${prefix}/"
+    $liveNormalized = $liveNormalized -replace "src=`"/${escapedPrefix}/", "src=`"./${prefix}/"
+    $liveNormalized = $liveNormalized -replace "href=`"/${escapedPrefix}/", "href=`"./${prefix}/"
+    $liveNormalized = $liveNormalized -replace "src='/${escapedPrefix}/", "src='./${prefix}/"
+    $liveNormalized = $liveNormalized -replace "href='/${escapedPrefix}/", "href='./${prefix}/"
+}
+
+foreach ($asset in $rootAssets) {
+    $escapedAsset = [regex]::Escape($asset)
+    $liveNormalized = $liveNormalized -replace "https?://${escapedDomain}/${escapedAsset}", "./${asset}"
+    $liveNormalized = $liveNormalized -replace "src=`"/${escapedAsset}`"", "src=`"./${asset}`""
+    $liveNormalized = $liveNormalized -replace "href=`"/${escapedAsset}`"", "href=`"./${asset}`""
+}
 
 if ($liveNormalized -eq $local) {
     Write-Host "PERFECT MATCH — local HTML is byte-identical to live (after path normalization)"
 } else {
-    # Report size difference
+    # Show first differing line for debugging
     Write-Host "MISMATCH: live=$($liveNormalized.Length) local=$($local.Length)"
+    for ($i = 0; $i -lt [Math]::Min($liveNormalized.Length, $local.Length); $i++) {
+        if ($liveNormalized[$i] -ne $local[$i]) {
+            $ctx = [Math]::Max(0, $i - 20)
+            Write-Host "First diff at byte $i : context='$($liveNormalized.Substring($ctx, [Math]::Min(60, $liveNormalized.Length - $ctx)))'"
+            break
+        }
+    }
 }
 ```
 
@@ -386,6 +548,58 @@ Take a full-page screenshot of `http://localhost:8765/` and compare visually wit
 
 ---
 
+### Step 12: Sitemap Discovery (Optional — Multi-Page)
+
+For sites with multiple pages, extract the link structure to enable crawling:
+
+**12a — Extract internal links from the cloned HTML:**
+
+```powershell
+$html = Get-Content "$cloneDir\index.html" -Raw -Encoding UTF8
+
+# Extract all <a href> pointing to same domain
+$internalLinks = [regex]::Matches($html, 'href="(https?://' + [regex]::Escape($domain) + '(/[^"#]*))"') |
+    ForEach-Object { $_.Groups[2].Value } |
+    Where-Object { $_ -notmatch '\.(webp|png|jpg|jpeg|svg|gif|ico|mp4|webm|pdf|zip)$' } |
+    Sort-Object -Unique
+
+Write-Host "Internal pages found: $($internalLinks.Count)"
+$internalLinks | ForEach-Object { Write-Host "  $_" }
+```
+
+**12b — Also try common sitemap locations:**
+
+```powershell
+$sitemapUrls = @(
+    "https://$domain/sitemap.xml",
+    "https://$domain/sitemap_index.xml",
+    "https://$domain/sitemap-index.xml",
+    "https://$domain/robots.txt"
+)
+foreach ($url in $sitemapUrls) {
+    try {
+        $content = curl.exe -s -L --max-time 10 "$url" 2>&1
+        if ($content -match '<urlset|<sitemapindex|<url>|Sitemap:') {
+            Write-Host "  FOUND: $url — save for crawling"
+            $fileName = Split-Path $url -Leaf
+            [System.IO.File]::WriteAllText("$cloneDir\$fileName", $content, [System.Text.UTF8Encoding]::new($false))
+        }
+    } catch { }
+}
+```
+
+**12c — Update manifest with discovered pages:**
+
+```powershell
+$manifest = Get-Content "$cloneDir\site-manifest.json" -Raw | ConvertFrom-Json
+$manifest.pages = @("/") + @($internalLinks | ForEach-Object { $_ })
+$manifest | ConvertTo-Json -Depth 3 | Out-File -FilePath "$cloneDir\site-manifest.json" -Encoding utf8
+```
+
+**Note:** This step does NOT clone sub-pages automatically. Run the skill again for each discovered URL to clone them individually. For full-site crawling, consider `wget --mirror` as a complementary tool.
+
+---
+
 ## Common Pitfalls & Fixes
 
 | # | Pitfall | Symptom | Root Cause | Fix |
@@ -398,6 +612,45 @@ Take a full-page screenshot of `http://localhost:8765/` and compare visually wit
 | 6 | **Root-level assets missed** | `transitions.js`, `noise.js` not downloaded | Asset pattern only matches subdirectories | Step 5a pattern uses `[^"]+` not `(images/|...)` |
 | 7 | **CSS url() not captured** | Background images 404 | `url()` references in inline CSS not matched by attr grep | Add: `$html -match 'url\(([^)]+)\)'` for inline styles |
 | 8 | **HTML charset not set** | Browser shows garbled text | Server sends `Content-Type: text/html` without charset | Use `text/html; charset=utf-8` in server MIME config |
+| 9 | **Cloudflare email obfuscation** | Emails show as `[email protected]` | CF's `email-decode.min.js` + `__cf_email__` spans | Remove both: strip CF email spans, use direct `mailto:` links |
+| 10 | **Cloudflare analytics beacon** | 404 on `/cdn-cgi/rum` | CF Rocket Loader injects `cf-beacon` script | Remove `<script defer src='/cdn-cgi/...'>` blocks from HTML |
+| 11 | **Nuxt `_nuxt/` paths** | CSS/JS chunks 404 | Nuxt uses hashed filenames under `_nuxt/` | `_nuxt/` prefix must be in the download list; hash filenames auto-discovered by Performance API |
+| 12 | **Next.js `_next/` paths** | Static assets 404 | Next.js places hashed assets under `_next/static/` | Same as Nuxt — Performance API catches these; dynamic prefix discovery handles rewrites |
+| 13 | **Astro hoisted scripts** | JS breaks in cloned copy | Astro hoists `<script>` to `<head>` as `type="module"` — scope isolation | If rebuilding in Astro: add `is:inline` directive to inline scripts. For raw clone: scripts already in original positions |
+| 14 | **GSAP / animation libraries** | Animations don't run locally | ScrollTrigger tied to `window` dimensions that differ in headless capture | Not fixable — animations depend on runtime viewport. Static snapshot captures the default state |
+| 15 | **WebGL / Three.js canvas** | 3D elements render as blank or frozen | Canvas content is procedural; no static file to capture | Use `canvas.toDataURL()` to snapshot the current frame during capture (Step 2a) |
+
+---
+
+## Framework-Specific Patterns
+
+When the pre-flight (Step 0) detects a known framework, apply these targeted rules:
+
+### Nuxt.js / Nuxt 3
+- Asset path prefix: `_nuxt/` (auto-discovered by Performance API)
+- Lazy routes: `_nuxt/builds/...` chunks loaded on scroll — interaction sweep triggers them
+- Watch for: `__NUXT__` JSON payload in HTML — leave as-is (needed for hydration)
+
+### Next.js
+- Asset path prefix: `_next/static/`
+- Watch for: `__NEXT_DATA__` JSON with page props — leave as-is
+- Image optimization: `_next/image?url=...` URLs → save as regular images, rewrite to local paths
+
+### WordPress
+- Uploads: `wp-content/uploads/` (year/month structure)
+- Theme assets: `wp-content/themes/{theme}/`
+- Plugins: `wp-content/plugins/`
+- Watch for: `?ver=` query strings on CSS/JS (cache busters) — strip during download
+
+### Shopify
+- CDN assets: usually on `cdn.shopify.com` (external — do not download)
+- Product images: `//cdn.shopify.com/...` → try downloading if same-origin
+- Theme assets: often on a separate `//theme-assets.` subdomain
+
+### Astro
+- Build output: `_astro/` prefix for hashed assets
+- Inline scripts: preserved in original positions by `is:inline` (rebuild concern only)
+- CSS: bundled into single hashed file, sometimes inlined as `<style>` in production
 
 ---
 
@@ -456,7 +709,7 @@ These are fundamental constraints of snapshot-based static cloning, not bugs.
 | **Geo-IP targeted content** | Capture server location determines variant | Use VPN when Playwright/bouncy has proxy support. |
 | **Infinite scroll (without scroll step)** | Only initial items in DOM | Use the scroll-to-bottom step in Step 2a. |
 | **`eval()` / obfuscated JS asset URLs** | URLs constructed at runtime inside JS closures | Performance API catches these (Step 2c). |
-| **Multi-page site sub-pages** | Skill clones ONE page deeply, not a crawl | Run the skill again for each sub-page URL. |
+| **Multi-page site sub-pages** | Skill clones ONE page deeply, not a crawl | Step 12 discovers internal links + sitemaps. Run the skill again per URL, or use `wget --mirror` for full sites. |
 | **sitemap.xml / robots.txt** | Not linked from page HTML | Manually `curl https://domain.com/robots.txt`. |
 
 ---
