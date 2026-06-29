@@ -8,7 +8,7 @@
 
 ## What it does
 
-| Step | Action | New in v2 |
+| Step | Action | New in v1.0.1 |
 |------|--------|-----------|
 | 1. Setup | Create clone directory with domain-named folder | |
 | 2. Capture | Navigate + scroll + capture DOM with Shadow DOM serialization + Performance API resource list | **Enhanced** |
