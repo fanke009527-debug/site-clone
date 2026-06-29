@@ -131,24 +131,36 @@ Wait 3 seconds for initial JS execution.
    Wait 2 seconds after scroll.
 
 2. HOVER over navigation items to reveal dropdowns:
-   mcp__playwright__browser_hover → selector: "nav a, .nav-item, [class*=menu]"
-   (Hover each match; wait 300ms between)
-   mcp__playwright__browser_snapshot → capture revealed content
+   FIRST — take a snapshot to identify hover targets:
+   mcp__playwright__browser_snapshot →
+   (Find interactive elements matching nav links, menu items, dropdown triggers.
+    Note their `index` values from the snapshot's interactive list.)
+   
+   For each matched element:
+   mcp__playwright__browser_hover → index (from snapshot)
+   Wait 300ms between each hover.
+   mcp__playwright__browser_snapshot → capture revealed dropdown content
 
 3. CLICK through carousels/tabs to capture all slides/panels:
+   FIRST — detect controls via evaluate:
    mcp__playwright__browser_evaluate →
    () => {
-     // Detect carousel/tab controls
      const controls = [
        ...document.querySelectorAll('[class*=carousel] button, [class*=slider] button, [class*=tab], .swiper-button, [role=tab]')
      ];
      return JSON.stringify(controls.map(c => ({ text: c.textContent?.trim().slice(0,40), tag: c.tagName, className: c.className?.slice(0,60) })));
    }
    
-   Then click each control and capture state:
-   mcp__playwright__browser_click → index of each control
+   THEN — take a snapshot to get Playwright's interactive element indices:
+   mcp__playwright__browser_snapshot →
+   (Match the detected controls from the evaluate output to snapshot elements by text/tag/class.
+    Use the `index` from the snapshot's interactive list — NOT the JSON array position.)
+   
+   For each matched control:
+   mcp__playwright__browser_click → index (from snapshot)
+   Wait 500ms after each click for animations/content swap
    mcp__playwright__browser_evaluate → () => document.documentElement.outerHTML
-   (Save each state's HTML as a variant for reference)
+   (Save each state's HTML as a variant in $cloneDir/variants/)
 
 4. RETURN to default state:
    mcp__playwright__browser_navigate → url (reload)
@@ -249,7 +261,7 @@ $resources = $perfData | ConvertFrom-Json
 $assets = $resources | Where-Object {
     $_.url -like "https://$domain/*" -and
     $_.url -notlike "https://$domain/" -and
-    $_.url -notlike "https://$domain`?" -and
+    $_.url -notlike "https://$domain[?]*" -and
     $_.url -notlike "data:*"
 } | ForEach-Object { $_.url -replace "https://$domain/", '' } | Sort-Object -Unique
 ```
@@ -578,7 +590,7 @@ $sitemapUrls = @(
 )
 foreach ($url in $sitemapUrls) {
     try {
-        $content = curl.exe -s -L --max-time 10 "$url" 2>&1
+        $content = curl.exe -s -L --max-time 10 "$url"
         if ($content -match '<urlset|<sitemapindex|<url>|Sitemap:') {
             Write-Host "  FOUND: $url — save for crawling"
             $fileName = Split-Path $url -Leaf
