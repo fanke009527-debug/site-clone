@@ -280,9 +280,16 @@ $htmlAssets = [regex]::Matches($html, $pattern) | ForEach-Object { $_.Groups[1].
     $_ -match '\.(webp|png|jpg|jpeg|svg|gif|avif|ico|bmp|mp4|webm|mov|mp3|wav|woff2?|ttf|otf|eot|js|mjs|cjs|css|json|xml|csv|pdf|vtt|map|txt|zip)$'
 } | ForEach-Object { $_ -replace '^\./', '' -replace '^/', '' } | Sort-Object -Unique
 
-# Merge both lists
-$assets = @($assets + $htmlAssets | Sort-Object -Unique)
-Write-Host "Assets to download: $($assets.Count)"
+# --- Also extract url() references from inline <style> blocks and style="" attributes ---
+$urlPattern = 'url\(\s*["'']?([^"'')\s]+)["'']?\s*\)'
+$cssAssets = [regex]::Matches($html, $urlPattern) | ForEach-Object { $_.Groups[1].Value } | Where-Object {
+    $_ -notmatch '^https?://' -and
+    $_ -notmatch '^(#|data:|javascript:)'
+} | ForEach-Object { $_ -replace '^\./', '' -replace '^/', '' -replace '\?.*$', '' } | Sort-Object -Unique
+
+# Merge all three lists
+$assets = @($assets + $htmlAssets + $cssAssets | Sort-Object -Unique)
+Write-Host "Assets to download: $($assets.Count) (Performance API + $($htmlAssets.Count) attrs + $($cssAssets.Count) CSS urls)"
 ```
 
 **Step 5b — Check for `<base>` tag before downloading:**
@@ -307,7 +314,7 @@ foreach ($asset in $assets) {
     if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Path $localDir -Force | Out-Null }
 
     try {
-        curl.exe -s -L --max-time 30 -o $localPath "$baseUrl/$asset" 2>&1 | Out-Null
+        curl.exe -s -L --max-time 30 -o $localPath "$baseUrl/$asset"
         if ((Test-Path $localPath) -and ((Get-Item $localPath).Length -gt 100)) {
             Write-Host "  OK: $asset"
         } else {
@@ -323,6 +330,58 @@ foreach ($asset in $assets) {
 
 Write-Host "Downloaded: $($assets.Count - $failed.Count) / $($assets.Count)"
 if ($failed.Count -gt 0) { Write-Host "Failed: $($failed.Count) — will retry in validation pass" }
+
+# --- Step 5d: Scan downloaded CSS files for url() references ---
+# External CSS files may reference fonts, background images, etc. via url()
+# that neither Performance API nor HTML attribute scanning caught.
+Write-Host "`nScanning CSS files for url() references..."
+$cssFiles = Get-ChildItem -Path $cloneDir -Recurse -Filter "*.css" -File
+$cssDiscovered = @()
+
+foreach ($cssFile in $cssFiles) {
+    $cssContent = Get-Content $cssFile.FullName -Raw -Encoding UTF8
+    $urls = [regex]::Matches($cssContent, 'url\(\s*["'']?([^"'')\s]+)["'']?\s*\)') |
+        ForEach-Object { $_.Groups[1].Value } |
+        Where-Object {
+            $_ -notmatch '^https?://' -and
+            $_ -notmatch '^(#|data:)' -and
+            $_ -match '\.(woff2?|ttf|otf|eot|webp|png|jpg|jpeg|svg|gif|avif|ico|mp4|webm)$'
+        } |
+        ForEach-Object { $_ -replace '^\./', '' -replace '^/', '' -replace '\?.*$', '' }
+
+    foreach ($url in $urls) {
+        # CSS url() paths are relative to the CSS file's directory
+        $cssDir = Split-Path $cssFile.FullName -Parent
+        $resolvedPath = Join-Path $cssDir $url
+        $relativePath = $resolvedPath -replace [regex]::Escape($cloneDir), '' -replace '^\\', '' -replace '\\', '/'
+        
+        if (-not (Test-Path $resolvedPath) -and $relativePath -notin $assets) {
+            $cssDiscovered += $relativePath
+        }
+    }
+}
+
+$cssDiscovered = $cssDiscovered | Sort-Object -Unique
+if ($cssDiscovered.Count -gt 0) {
+    Write-Host "  Found $($cssDiscovered.Count) additional CSS assets (fonts, bg images)"
+    foreach ($asset in $cssDiscovered) {
+        $localPath = Join-Path $cloneDir $asset
+        $localDir = Split-Path $localPath -Parent
+        if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Path $localDir -Force | Out-Null }
+        try {
+            curl.exe -s -L --max-time 30 -o $localPath "$baseUrl/$asset"
+            if ((Test-Path $localPath) -and ((Get-Item $localPath).Length -gt 100)) {
+                Write-Host "    OK: $asset"
+                $assets += $asset
+            } else {
+                Remove-Item $localPath -Force -ErrorAction SilentlyContinue
+                Write-Host "    EMPTY: $asset"
+            }
+        } catch { Write-Host "    FAIL: $asset" }
+    }
+} else {
+    Write-Host "  No additional CSS assets found"
+}
 ```
 
 ---
@@ -622,7 +681,7 @@ $manifest | ConvertTo-Json -Depth 3 | Out-File -FilePath "$cloneDir\site-manifes
 | 4 | **Playwright disconnects** | Tool not available mid-session | MCP server dropped | Use bouncy/curl for capture; curl for validation |
 | 5 | **Tiny/broken downloads** | Files < 100 bytes | CDN returned error page instead of asset | Post-download size check: delete if < 100 bytes |
 | 6 | **Root-level assets missed** | `transitions.js`, `noise.js` not downloaded | Asset pattern only matches subdirectories | Step 5a pattern uses `[^"]+` not `(images/|...)` |
-| 7 | **CSS url() not captured** | Background images 404 | `url()` references in inline CSS not matched by attr grep | Add: `$html -match 'url\(([^)]+)\)'` for inline styles |
+| 7 | **CSS url() not captured** | Background images 404 | `url()` references in CSS not matched by html attr grep | **FIXED v1.2:** Step 5a scans inline `<style>` + style="". Step 5d scans all downloaded `.css` files for url() and downloads missing assets |
 | 8 | **HTML charset not set** | Browser shows garbled text | Server sends `Content-Type: text/html` without charset | Use `text/html; charset=utf-8` in server MIME config |
 | 9 | **Cloudflare email obfuscation** | Emails show as `[email protected]` | CF's `email-decode.min.js` + `__cf_email__` spans | Remove both: strip CF email spans, use direct `mailto:` links |
 | 10 | **Cloudflare analytics beacon** | 404 on `/cdn-cgi/rum` | CF Rocket Loader injects `cf-beacon` script | Remove `<script defer src='/cdn-cgi/...'>` blocks from HTML |
