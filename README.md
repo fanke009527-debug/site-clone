@@ -1,166 +1,293 @@
-# site-clone — Claude Code Website Cloning & Rebuilding Suite
+# site-clone — Website Cloning & Rebuilding Suite for Claude Code
 
-> **Two skills, one workflow**: Clone any website → Rebuild as your own brand site.
->
-> `/site-clone` — scrape, download, validate. `/site-rebuild` — analyze, extract, generate.
+> **Clone. Analyze. Rebuild.** A dual-skill pipeline that turns any website into a fully customizable, config-driven Astro site — in a single conversation.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-Skill-blue)](https://claude.ai/code)
+
+```
+  Target URL                    Clone Output                  Brand Site
+  ─────────                    ────────────                  ──────────
+  https://example.com  ──▶  site-clones/example.com/  ──▶  brand-site/
+       │                        │                               │
+       │  /site-clone           │  /site-rebuild                │
+       │  • capture             │  • topology map               │
+       │  • download            │  • design tokens              │
+       │  • rewrite             │  • component specs            │
+       │  • validate            │  • Astro generation           │
+       │                        │                               │
+       ▼                        ▼                               ▼
+    77 files                zero console errors          npx astro dev @ :4321
+```
+
+---
+
+## Overview
+
+**site-clone** is a pair of Claude Code skills that together form a complete website cloning and rebranding pipeline. The first skill, `/site-clone`, performs a forensic-grade capture of a live website — HTML, CSS, JavaScript, fonts, images, and videos — and serves them locally with zero console errors. The second skill, `/site-rebuild`, reads that clone, analyzes its visual structure, extracts design tokens, and generates a brand-customizable Astro project.
+
+**Why this exists.** Manually cloning a website for inspiration or rebranding is tedious and error-prone. Existing tools miss dynamically-loaded assets, break non-ASCII content, and leave you with a static snapshot you can't customize. This suite solves all three problems: exhaustive asset capture, byte-exact fidelity, and a generated codebase you actually own and can edit.
 
 ---
 
 ## Quick Start
 
+### Installation
+
+**macOS / Linux:**
+
 ```bash
-# Install both skills
 git clone https://github.com/fanke009527-debug/site-clone.git ~/.claude/skills/site-clone
 ln -s ~/.claude/skills/site-clone/site-rebuild ~/.claude/skills/site-rebuild
+```
 
-# Or on Windows (PowerShell):
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/fanke009527-debug/site-clone.git $env:USERPROFILE\.claude\skills\site-clone
 New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\site-rebuild" -Target "$env:USERPROFILE\.claude\skills\site-clone\site-rebuild"
 ```
 
-Then in Claude Code:
+### Usage
+
+Invoke directly in Claude Code:
+
 ```
-/site-clone https://example.com/landing-page    # Step 1: clone
-/site-rebuild                                    # Step 2: rebuild as brand site
+/site-clone https://example.com/landing-page    # Step 1: clone the target site
+/site-rebuild                                    # Step 2: rebuild as an Astro brand site
+```
+
+After `/site-rebuild` completes, customize your site by editing a single file:
+
+```
+brand-site/src/config.ts    ← brand name, colors, typography, content
 ```
 
 ---
 
 ## Skill 1: `/site-clone` — Website Cloning (v1.2)
 
-| Step | Action |
-|------|--------|
-| 0. Pre-flight | Check accessibility, detect framework, auth/bot walls |
-| 1. Setup | Create clone directory with domain-named folder |
-| 2. Capture | Interaction sweep (scroll→hover→click) + Shadow DOM + Performance API |
-| 3. Save | Write HTML with correct UTF-8 encoding (no BOM) |
-| 4. Verify | Check encoding integrity, confirm non-ASCII characters preserved |
-| 5. Download | Performance API + HTML attr regex + **CSS url() scan** + **external CSS file scan** |
-| 6. Rewrite | Dynamic prefix discovery + `<base href="./">` safety net + Cloudflare cleanup |
-| 7. Compare | Byte-level HTML comparison with diff location reporting |
-| 8. Server | Node.js zero-dependency server with charset-correct MIME types |
-| 9. Validate | Console error detection → download 404s → iterate to zero errors |
-| 10. Manifest | Generate `site-manifest.json` with full inventory |
-| 11. Screenshot | Full-page visual comparison |
-| 12. Sitemap | Extract internal links + try sitemap.xml/robots.txt |
+A one-shot capture pipeline that produces a locally-served, pixel-accurate mirror of any website.
 
-### v1.2 — CSS url() download gap fixed
+### Pipeline
 
-The #1 silent asset loss was CSS `url()` references — background images in inline styles and fonts declared in external `.css` files (e.g. `@font-face { src: url(...) }`). Neither HTML attribute scanning nor Performance API reliably caught these.
+| # | Stage | Description | Why It Matters |
+|---|-------|-------------|----------------|
+| 0 | **Pre-flight** | Accessibility check, framework fingerprinting, auth/bot-wall detection | Fails fast — avoids wasting time on unclonable targets |
+| 1 | **Setup** | Create domain-named clone directory with mirrored path structure | Keeps assets organized exactly as the server expects |
+| 2 | **Capture** | Interaction sweep (scroll → hover → click), Shadow DOM serialization, Performance API resource dump | Triggers lazy-loaded content and discovers assets that HTML scanners miss |
+| 3 | **Save** | Write HTML with BOM-free UTF-8 encoding | Preserves Chinese, Japanese, emoji, and all non-ASCII content |
+| 4 | **Verify** | Encoding integrity check | Confirms round-trip fidelity before proceeding |
+| 5 | **Download** | Performance API entries + HTML attribute scanning + inline CSS `url()` extraction + external CSS file `url()` scanning | Four-pass asset discovery — catches background images, icon fonts, and `@font-face` sources |
+| 6 | **Rewrite** | Dynamic prefix discovery, path rewriting, `<base href="./">` injection, Cloudflare artifact removal | Adapts to any framework's directory structure without hardcoded patterns |
+| 7 | **Compare** | Byte-level HTML diff with location reporting | Detects corruption introduced during save/rewrite |
+| 8 | **Server** | Zero-dependency Node.js static server with correct charset MIME types | Serves the clone exactly as a real web server would |
+| 9 | **Validate** | Console error detection → download missing assets → iterate to zero errors | Converges to a clean, warning-free local clone |
+| 10 | **Manifest** | Generate `site-manifest.json` with full file inventory and sizing | Feeds structured data into `/site-rebuild` |
+| 11 | **Screenshot** | Full-page visual comparison against original | Catches layout differences that byte-level checks miss |
+| 12 | **Sitemap** | Internal link extraction, `sitemap.xml` and `robots.txt` probing | Discovers multi-page sites beyond the entry URL |
 
-**Step 5 now has two additional passes:**
-- **5a**: Scans inline `<style>` blocks and `style=""` attributes for `url()` references
-- **5d**: After downloading, scans every downloaded `.css` file for `url()` references and fetches any assets still missing
+### Key Technical Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Performance API as primary asset source** | `performance.getEntriesByType('resource')` captures everything the browser actually loaded — including dynamically-injected `<script>`, lazy images, and XHR-fetched assets that regex scanning misses |
+| **Four-pass CSS asset discovery** | Inline `<style>` blocks, `style=""` attributes, and external `.css` files each hide `url()` references. Only scanning all three catches everything |
+| **Dynamic path prefix discovery** | Instead of hardcoding `/_nuxt/`, `/static/`, etc., the pipeline auto-discovers prefixes from the asset list — works with any framework |
+| **BOM-free UTF-8** | PowerShell defaults to UTF-16 LE. Using `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)` prevents BOM corruption that breaks CSS and JS |
+| **Zero-dependency server** | A 30-line Node.js `http` server with correct MIME types and charset headers — no `npm install` needed |
+| **Convergent validation loop** | Rather than a single pass, the validator re-checks console errors after each fix until clean — handles cascading 404s |
 
 ---
 
 ## Skill 2: `/site-rebuild` — Clone → Brand Site
 
-Takes the output of `/site-clone` and rebuilds it as a config-driven Astro site.
+Transforms a cloned website into a config-driven Astro project with full brand customization.
 
-| Phase | What it does |
-|-------|-------------|
-| 1. Inventory | Read manifest, screenshot the clone, report scope |
-| 2. Topology | LLM visually maps page structure → `PAGE_TOPOLOGY.md` |
-| 3. Design Tokens | `getComputedStyle()` on key elements → `design-tokens.json` |
-| 4. Component Specs | Per-section HTML + CSS + assets + behavior → `specs/` directory |
-| 5. Astro Generation | Config-driven `.astro` components with brand customization |
-| 6. Validation | Build check, screenshot comparison, responsive testing |
+### Philosophy
 
-### Design philosophy
+> **Clone is scriptable. Rebuild is not.**
 
-**Clone is scriptable. Rebuild is not.** Rebuild requires visual judgment — which section is the Hero, where component boundaries fall, which color is the brand primary. The skill guides the LLM through this analysis and writes every decision to files before generating code, so you can review and correct.
+Downloading files can be automated. But identifying which section is the Hero, where component boundaries fall, and which color is the brand primary — these require visual judgment. `/site-rebuild` guides the LLM through this analysis, writing every decision to reviewable files before generating any code.
 
-### Output
+### Pipeline
+
+| # | Phase | Output | Description |
+|---|-------|--------|-------------|
+| 1 | **Inventory** | — | Reads manifest, serves the clone, takes a full-page screenshot, reports scope to the user |
+| 2 | **Topology** | `PAGE_TOPOLOGY.md` | LLM analyzes the screenshot and HTML to identify semantic sections (Hero, Features, CTA, Footer...) with DOM selectors, heights, and interaction notes |
+| 3 | **Design Tokens** | `design-tokens.json` | `getComputedStyle()` extraction on each section's root element — colors, typography, spacing, radii, shadows |
+| 4 | **Component Specs** | `specs/{section}.md` | Per-section HTML structure, CSS rules, asset mappings, and behavior notes |
+| 5 | **Astro Generation** | `brand-site/` | Generates a complete Astro project: `config.ts` for branding, one `.astro` component per section, `BaseLayout.astro` shell, `global.css` with CSS custom properties |
+| 6 | **Validation** | — | Build check, screenshot comparison, responsive testing at 375px / 768px / 1200px, config audit |
+
+### Generated Project Structure
 
 ```
 brand-site/
 ├── src/
-│   ├── config.ts              # Edit this to re-brand
-│   ├── pages/index.astro      # Composes all sections
-│   ├── layouts/BaseLayout.astro
-│   ├── components/            # One .astro per section
-│   └── styles/global.css
-├── public/                    # Assets copied from clone
+│   ├── config.ts              # ← Edit this to re-brand (colors, fonts, content)
+│   ├── pages/
+│   │   └── index.astro        # Composes all sections in order
+│   ├── layouts/
+│   │   └── BaseLayout.astro   # HTML shell, meta tags, font loading, analytics
+│   ├── components/
+│   │   ├── Nav.astro
+│   │   ├── Hero.astro
+│   │   ├── Features.astro     # One component per topology section
+│   │   ├── ...
+│   │   └── Footer.astro
+│   └── styles/
+│       └── global.css         # CSS custom properties + Tailwind imports
+├── public/
+│   ├── images/                # Copied from clone
+│   ├── videos/
+│   └── fonts/
 └── astro.config.ts
 ```
 
+### Design Principles
+
+| Principle | Implementation |
+|-----------|----------------|
+| **Config-driven** | All brand values in `config.ts` — zero hardcoded strings in components |
+| **Component-per-section** | Each semantic section is its own `.astro` file — add, remove, or reorder at will |
+| **Scoped styles** | Each component carries its CSS in a `<style>` block — no global namespace pollution |
+| **Reviewable decisions** | Topology, tokens, and specs are written to files before code generation — user approves before anything is built |
+| **Validation gate** | Build must pass, screenshots must match, responsive breakpoints must work |
+
 ---
 
-## How They Chain Together
+## How They Chain
 
 ```
-User: "clone https://example.com and make it my brand site"
+User types: "clone https://example.com and make it my brand site"
 
-/site-clone:
-  example.com/ → pre-flight → interaction sweep → download 77 files
-  → rewrite paths → zero console errors → manifest + screenshot
-
-/site-rebuild:
-  reads clone output → maps 8 sections → extracts design tokens
-  → writes 8 component specs → generates Astro project
-  → `npx astro dev` running at localhost:4321
-
-User edits src/config.ts → done.
+┌─────────────────────────────────────────────────────────┐
+│ /site-clone                                              │
+│                                                          │
+│  example.com/  →  pre-flight check (framework: Nuxt)     │
+│               →  interaction sweep (scroll, hover, click) │
+│               →  capture 84 network requests              │
+│               →  download 77 assets (19.2 MB)             │
+│               →  rewrite paths (dynamic prefix: /_nuxt/)  │
+│               →  start server @ localhost:8765            │
+│               →  validate: 0 console errors               │
+│               →  manifest + screenshot                    │
+│                                                          │
+│  Output: site-clones/example.com/                        │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────┐
+│ /site-rebuild                                            │
+│                                                          │
+│  reads clone  →  maps 8 semantic sections                │
+│              →  extracts design tokens (colors, fonts)    │
+│              →  writes 8 component specs                  │
+│              →  generates Astro project                   │
+│              →  npx astro build: ✅ pass                  │
+│              →  screenshot comparison: ✅ match            │
+│                                                          │
+│  Output: brand-site/ (npx astro dev @ localhost:4321)    │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ▼
+          User edits src/config.ts → done.
 ```
 
 ---
 
 ## Compatibility
 
-| AI Tool | site-clone | site-rebuild |
-|---------|-----------|-------------|
-| **Claude Code** | Full (Playwright + Performance API) | Full (needs browser for screenshot + computed styles) |
-| **Codex CLI** | Static mode only | Partial (no browser for visual analysis) |
+| Environment | `/site-clone` | `/site-rebuild` |
+|-------------|:---:|:---:|
+| **Claude Code** (desktop / CLI / IDE) | Full | Full |
+| **Codex CLI** | Static mode only | Partial |
 | **Cursor** | Static mode only | Partial |
-| **aider / terminal AI** | Static mode only | Partial |
+| **aider / terminal agents** | Static mode only | Partial |
+
+**Static mode** falls back to `fetch` + `scrape` (via bouncy MCP) for HTML and visible assets — no JavaScript execution, no lazy-loaded content, no Performance API. Suitable for simple static sites.
 
 ---
 
-## File Structure
+## Verified Test Cases
+
+### nudot.com.tw
+
+A complex commercial site with Chinese content, GSAP scroll animations, Three.js 3D rendering, 12 background videos, and Cloudflare protection.
+
+| Metric | Result |
+|--------|--------|
+| Assets captured | 77 files, 19.2 MB |
+| Console errors | 0 |
+| HTML fidelity | Byte-exact after rewrite |
+| Framework detected | Nuxt 3 |
+| Clone time | ~2 minutes |
+| Rebuild output | 5,535 lines of Astro, 26/26 validation checks passed |
+
+### obsidianassembly.com
+
+A modern documentation site built with Next.js, testing static generation patterns and MDX routing.
+
+| Metric | Result |
+|--------|--------|
+| Assets captured | 100% (no missing resources) |
+| Console errors | 0 |
+| Framework detected | Next.js (ISR) |
+
+---
+
+## Repository Structure
 
 ```
 site-clone/
-├── SKILL.md                  # /site-clone skill definition
-├── README.md                 # This file
-├── LICENSE                   # MIT
+├── SKILL.md                   # /site-clone skill definition (831 lines, v1.2)
+├── README.md                  # This file
+├── LICENSE                    # MIT
 ├── site-rebuild/
-│   └── SKILL.md              # /site-rebuild skill definition
+│   └── SKILL.md               # /site-rebuild skill definition (306 lines, v1.0)
 └── .gitignore
 ```
 
-After running both skills:
+After running both skills, your working directory will contain:
 
 ```
-site-clones/example.com/       # Clone output
-├── index.html
-├── server.js
-├── site-manifest.json
-├── PAGE_TOPOLOGY.md           # Added by site-rebuild
-├── design-tokens.json         # Added by site-rebuild
-├── specs/                     # Added by site-rebuild
-├── images/ videos/ fonts/ ...
+site-clones/{domain}/           # Clone output (auto-created)
+├── index.html                  # Rewritten HTML with local paths
+├── server.js                   # Zero-dependency static server
+├── site-manifest.json          # Full asset inventory
+├── PAGE_TOPOLOGY.md            # Semantic section map (from /site-rebuild)
+├── design-tokens.json          # Extracted visual design tokens (from /site-rebuild)
+├── specs/                      # Per-section component specs (from /site-rebuild)
+│   ├── Nav.md
+│   ├── Hero.md
+│   └── ...
+├── images/ videos/ fonts/ ...  # Downloaded assets
 
-brand-site/                    # Generated Astro project
-├── src/ ...
-└── public/ ...
+brand-site/                     # Generated Astro project (from /site-rebuild)
+├── src/
+│   ├── config.ts
+│   ├── pages/index.astro
+│   ├── layouts/BaseLayout.astro
+│   ├── components/
+│   └── styles/global.css
+├── public/                     # Copied assets
+└── astro.config.ts
 ```
 
 ---
 
-## Test Cases
+## Limitations
 
-**nudot.com.tw** — Chinese content, GSAP animations, Three.js 3D cube, 12 videos, Cloudflare protection.
-
-| Phase | Tool | Result |
-|-------|------|--------|
-| Clone | /site-clone | 77 files, 19.2 MB, 0 console errors, byte-exact HTML |
-| Rebuild | /site-rebuild | 5,535-line Astro site, 26/26 validation checks passed |
+- **Auth-gated sites** cannot be cloned (requires valid session credentials)
+- **CAPTCHA-protected pages** will block automated access
+- **Complex WebGL / Three.js scenes** are captured as static snapshots — interactive 3D state is not preserved
+- **Streaming / WebSocket content** is not captured (only the initial render)
+- **E-commerce logic** (carts, checkout, user accounts) is not recreated — the generated site is static
+- `/site-rebuild` requires Claude Code (needs a browser for visual analysis)
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
