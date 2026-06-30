@@ -22,7 +22,9 @@ allowed-tools:
   - Glob
   - mcp__playwright__browser_navigate
   - mcp__playwright__browser_evaluate
+  - mcp__playwright__browser_snapshot
   - mcp__playwright__browser_take_screenshot
+  - mcp__playwright__browser_console_messages
   - mcp__bouncy__fetch
   - mcp__bouncy__scrape
 ---
@@ -47,12 +49,24 @@ Clone is scriptable. Rebuild is not. Rebuild requires visual judgment — which 
 
 ### Phase 1: Inventory — Know What We're Working With
 
+**First, locate the clone directory.** The site-clone output lives at `E:\Projects\claude-code\site-clones\{domain}/`. If you ran /site-clone in the same session, the `$cloneDir` variable should still be in context. Otherwise:
+
+```powershell
+# Find the most recent clone
+$cloneDir = Get-ChildItem -Path "E:\Projects\claude-code\site-clones" -Directory |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1 |
+    ForEach-Object { $_.FullName }
+Write-Host "Clone directory: $cloneDir"
+```
+
 Read the clone output to understand scope:
 
-1. Read `site-manifest.json` — file count, asset breakdown, discovered pages
-2. Read `index.html` — get a feel for size and structure (line count, major `<section>` tags)
-3. Open `http://localhost:8765/` in Playwright and take a full-page screenshot
-4. Report to user: "I have a [X]KB page with [Y] assets. Ready to analyze structure."
+1. Read `$cloneDir/site-manifest.json` — file count, asset breakdown, discovered pages
+2. Read `$cloneDir/index.html` — get a feel for size and structure (line count, major `<section>` tags)
+3. Start the clone's server if not running: `node $cloneDir/server.js &`
+4. Open `http://localhost:8765/` in Playwright and take a full-page screenshot
+5. Report to user: "I have a [X]KB page with [Y] assets from {domain}. Ready to analyze structure."
 
 ```
 mcp__playwright__browser_navigate → http://localhost:8765/
